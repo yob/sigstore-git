@@ -40,16 +40,16 @@ Optionally, configure git to sign all commits without the -S flag:
 
 You can see the signature by printing the raw commit:
 
-   $ git cat-file commit HEAD
-   tree 929fb311f733b493d8b139b5e3c52fdbab4732e2
-   parent 008a69623e3fa408a9596240588c8ab212f1b0e9
-   author James Healy <james@yob.id.au> 1645997613 +1100
-   committer James Healy <james@yob.id.au> 1645998285 +1100
-   gpgsig -----BEGIN SIGNED MESSAGE-----
-    MIIH+gYJKoZIhvcNAQcCoIIH6zCCB+cCAQExDzANBglghkgBZQMEAgEFADALBgkq
-    hkiG9w0BBwGgggVqMIIDajCCAvCgAwIBAgIUAJhvLyJ3VcikUXBqkQyIbcz4KEcw
-    CgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhz 
-    <...>
+    $ git cat-file commit HEAD
+    tree 929fb311f733b493d8b139b5e3c52fdbab4732e2
+    parent 008a69623e3fa408a9596240588c8ab212f1b0e9
+    author James Healy <james@yob.id.au> 1645997613 +1100
+    committer James Healy <james@yob.id.au> 1645998285 +1100
+    gpgsig -----BEGIN SIGNED MESSAGE-----
+     MIIH+gYJKoZIhvcNAQcCoIIH6zCCB+cCAQExDzANBglghkgBZQMEAgEFADALBgkq
+     hkiG9w0BBwGgggVqMIIDajCCAvCgAwIBAgIUAJhvLyJ3VcikUXBqkQyIbcz4KEcw
+     CgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhz 
+     <...>
 
 On GitHub, the appear like this:
 
