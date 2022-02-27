@@ -2,9 +2,10 @@
 
 An experiment in signing git commits with x509 certificates provided by sigstore.
 
-The fulcio project by sigstore provides short lifespan (20min) x509 certificates that
-attest that the user controls a particular OIDC identity. At this stage GitHub, Google
-and Microsoft identities are supported.
+The [fulcio project](https://github.com/sigstore/fulcio) by
+[sigstore](https://www.sigstore.dev/) provides short lifespan (20min) x509
+certificates that attest that the user controls a particular OIDC identity. At
+this stage GitHub, Google and Microsoft identities are supported.
 
 Assuming you trust the sigstore project to only provide signed certificates to users
 who really own the OIDC identity, then commits signed by sigstore/fulcio can reliably
