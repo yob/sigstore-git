@@ -14,6 +14,15 @@ by trusted to have been made by the signed identity.
 This prototype is in ruby which isn't particularly portable, but it was a fast way
 for me to experiment. Sorry 🤷‍♂️
 
+## Why?
+
+My particular interest is in CI. I have some CI pipelines where I'd like to allowlist
+the humans who can execute jobs. By checking the signature of the head commit
+on a branch about to run on CI, I can be confident that the branch really was
+made by a human I trust to execute code in my CI environment.
+
+Assuming I trust sigstore 🙃
+
 ## Usage
 
 For now I assume you have a working ruby environment.
