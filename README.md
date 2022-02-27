@@ -1,4 +1,4 @@
-# sigstore-git
+# sigstore-git-commit
 
 An experiment in signing git commits with x509 certificates provided by sigstore.
 
