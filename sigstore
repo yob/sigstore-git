@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 
+require 'clamp'
 require 'fileutils'
 
 SIGSTORE_CACHE_DIR = File.expand_path("~/.cache/sigstore")
@@ -40,7 +41,7 @@ class SigstoreCache
     }.select { |entry|
       entry.split("-").last.to_i > now_epoch
     }.sort.last
-    
+
     if current_cache
       this_path = File.join(@path, current_cache)
 
@@ -90,7 +91,7 @@ end
 require 'base64'
 require 'openssl'
 
-class Crypto 
+class Crypto
   def initialize; end
 
   def generate_keys
@@ -116,7 +117,7 @@ require 'json/jwt'
 require "launchy"
 require "openid_connect"
 
-class OpenIDHandler 
+class OpenIDHandler
   def initialize(priv_key)
     @priv_key = priv_key
   end
@@ -298,81 +299,227 @@ class HttpClient
   end
 end
 
-# Fulcio root cert at https://raw.githubusercontent.com/sigstore/root-signing/main/repository/repository/targets/fulcio_v1.crt.pem
+def execute_sign(file_descriptor_id: nil)
+  cache = SigstoreCache.new(SIGSTORE_CACHE_DIR)
 
-cache = SigstoreCache.new(SIGSTORE_CACHE_DIR)
+  priv_key, certToSign = cache.fetch
+  if priv_key.nil? || certToSign.nil?
+    priv_key, pub_key, enc_pub_key = Crypto.new().generate_keys
+    proof, access_token = OpenIDHandler.new(priv_key).get_token
+    cert_response = HttpClient.new().get_cert(access_token, proof, enc_pub_key, "https://fulcio.sigstore.dev")
+    certPEM, rootPem = cert_response.split(/\n{2,}/)
+    certToSign = OpenSSL::X509::Certificate.new(certPEM)
+    cache.store(priv_key, certToSign)
+  end
 
-priv_key, certToSign = cache.fetch
-if priv_key.nil? || certToSign.nil?
-  priv_key, pub_key, enc_pub_key = Crypto.new().generate_keys
-  proof, access_token = OpenIDHandler.new(priv_key).get_token
-  #puts "proof: #{proof}"
-  #puts "proof: #{Base64.decode64(proof)}"
-  #puts "access_token: #{access_token}"
-  #puts "access_token: #{Base64.decode64(access_token.to_s)}"
-  #puts ""
-  cert_response = HttpClient.new().get_cert(access_token, proof, enc_pub_key, "https://fulcio.sigstore.dev")
-  certPEM, rootPem = cert_response.split(/\n{2,}/)
-  #puts certPEM
-  certToSign = OpenSSL::X509::Certificate.new(certPEM)
-  cache.store(priv_key, certToSign)
+  status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
+  File.open("sigstore-execute-sign.log", "wb") do |log|
+    log.puts ARGV.inspect
+    data_to_sign = STDIN.read(1048576)
+    log.puts data_to_sign
+    File.open("sigstore-data-to-sign.txt", "wb") do |to_sign|
+      to_sign.write(data_to_sign)
+    end
+
+    begin
+      bundled_certs = [
+        OpenSSL::X509::Certificate.new(FULCIO_ROOT)
+      ]
+      signed = OpenSSL::PKCS7::sign(certToSign, priv_key, data_to_sign, bundled_certs, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::BINARY).to_s
+    rescue StandardError => e
+      log.puts "Signing failed: #{e}"
+      exit 1
+    end
+
+    signed = signed.sub("-----BEGIN PKCS7-----", "-----BEGIN SIGNED MESSAGE-----")
+    signed = signed.sub("-----END PKCS7-----", "-----END SIGNED MESSAGE-----")
+
+    log.puts "BEGIN_SIGNING"
+    log.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01"
+    log.puts signed
+
+    log.flush
+
+    status_fd.puts "BEGIN_SIGNING" if file_descriptor_id
+    puts signed
+    status_fd.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01" if file_descriptor_id
+
+    begin
+      # TEST
+      pkcs7_text = signed.sub('-----BEGIN SIGNED MESSAGE-----', '')
+      pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
+      p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+
+      log.puts p7.inspect
+      log.puts p7.certificates.inspect
+      subjectAltName = nil
+      p7.certificates.first.extensions.each do |ext|
+        #puts "#{ext.inspect} #{ext.oid} #{ext.value}"
+        if ext.oid.to_s == "subjectAltName"
+          subjectAltName = ext.value.to_s
+        end
+      end
+      log.puts subjectAltName
+    rescue StandardError => e
+      log.puts "ERR: #{e.inspect}"
+    end
+
+  end
+  # TODO confirm the commit author email matches the email we'll be signing with
+rescue StandardError => e
+  File.open("sigstore-execute-sign.log", "wb") do |log|
+    log.puts("ERR: #{e}")
+  end
 end
 
-status_fd = IO.for_fd(2)
-File.open("sigstore.log", "wb") do |log|
-  log.puts ARGV.inspect
-  data_to_sign = STDIN.read(1048576)
-  log.puts data_to_sign
-  File.open("sigstore-data-to-sign.txt", "wb") do |to_sign|
-    to_sign.write(data_to_sign)
-  end
+def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_id: nil)
+  raise ArgumentError, "signed_data_path is required" if signed_data_path.nil?
+  raise ArgumentError, "signature_path is required" if signature_path.nil?
 
-  begin
-    bundled_certs = [
-      OpenSSL::X509::Certificate.new(FULCIO_ROOT)
-    ]
-    signed = OpenSSL::PKCS7::sign(certToSign, priv_key, data_to_sign, bundled_certs, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::BINARY).to_s
-  rescue StandardError => e
-    log.puts "Signing failed: #{e}"
-    exit 1
-  end
+  require 'openssl'
+  require 'base64'
+  File.open("sigstore-execute-verify.log", "wb") do |log|
+    status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
 
-  signed = signed.sub("-----BEGIN PKCS7-----", "-----BEGIN SIGNED MESSAGE-----")
-  signed = signed.sub("-----END PKCS7-----", "-----END SIGNED MESSAGE-----")
+    log.puts("signed_data_path: #{signed_data_path}")
+    log.puts("signature_path: #{signature_path}")
 
-  log.puts "BEGIN_SIGNING"
-  log.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01"
-  log.puts signed
+    signed_data = if signed_data_path == "-"
+                    STDIN.read(1048576)
+                  else
+                    File.read(signed_data_path)
+                  end
+    signature_data = if signature_path == "-"
+                       STDIN.read(1048576)
+                     else
+                       File.read(signature_path)
+                     end
 
-  log.flush
+    log.puts(signed_data)
+    log.puts(signature_data)
 
-  status_fd.puts "BEGIN_SIGNING"
-  puts signed
-  status_fd.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01"
-
-  begin
-    # TEST
-    pkcs7_text = signed.sub('-----BEGIN SIGNED MESSAGE-----', '')
+    pkcs7_text = signature_data.sub('-----BEGIN SIGNED MESSAGE-----', '')
     pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
+
     p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
-    
-    log.puts p7.inspect
-    log.puts p7.certificates.inspect
+
+    commit_epoch = signed_data[/committer.+ (\d+)/, 1].to_i
+
+    if commit_epoch == 0
+      $stderr.puts "No commit timestamp found"
+      exit 1
+    end
+    commit_time = Time.at(commit_epoch)
+
+    signer_certificate = nil
+
+    p7.certificates.each do |cert|
+      signer_certificate = cert if cert.serial == p7.signers.first.serial
+    end
+
+    if signer_certificate.nil?
+      $stderr.puts "No certificate found for signature"
+      exit 1
+    end
+    log.puts "************************************"
+    log.puts "signer cert"
+    log.puts signer_certificate.inspect
+
+    cert_store = OpenSSL::X509::Store.new
+    # This will load the CA's from our system. We don't want that, we only want to verify
+    # against the sigstore root
+    #cert_store.set_default_paths
+
+    root_cert = OpenSSL::X509::Certificate.new(FULCIO_ROOT)
+    cert_store.add_cert(root_cert)
+
+    # valid_signing_time? checks the time attributes already
+    # this flag is required, otherwise expired certificates would become
+    # unverified when notAfter within certificate attribute is reached
+    cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
+
+    # verify the signature has signed the commit, but don't check the key that did the signature
+    # has been signed by a trusted CA
+    log.puts "************************************"
+    log.puts "valid signature"
+    valid = p7.verify([], cert_store, signed_data, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
+    log.puts valid
+    if !valid
+      log.puts "err message: #{p7.error_string}"
+    end
+
+    log.puts "************************************"
+    log.puts "valid signing time"
+    valid_time = p7.signers.first.signed_time.between?(signer_certificate.not_before, signer_certificate.not_after) &&
+      p7.signers.first.signed_time >= commit_time
+
+    log.puts valid_time
+
+    log.puts "************************************"
+    log.puts "certificate trusted by sigstore/fulcio"
+    valid = p7.verify([], cert_store, signed_data, OpenSSL::PKCS7::DETACHED)
+    log.puts valid
+    if !valid
+      log.puts "err message: #{p7.error_string}"
+    end
+
+    log.puts "************************************"
+    log.puts "signing certificate is for a @buildkite.com user"
+    log.puts signer_certificate.subject
+
     subjectAltName = nil
-    p7.certificates.first.extensions.each do |ext|
-      #puts "#{ext.inspect} #{ext.oid} #{ext.value}"
+    signer_certificate.extensions.each do |ext|
       if ext.oid.to_s == "subjectAltName"
         subjectAltName = ext.value.to_s
       end
     end
     log.puts subjectAltName
+    log.puts signer_certificate.subject.to_s.end_with?("@buildkite.com") || subjectAltName.to_s.end_with?("@buildkite.com")
+
+    # TODO verify certificate hasn't been revoked - not on CRL
+    # gitlab has some useful code we can probably use for inspiration https://gitlab.com/gitlab-org/gitlab/-/merge_requests/17773/diffs
+
+    #status_fd.puts "\n[GNUPG:] BADSIG cert-fingerprint cert-subject" if file_descriptor_id
+    status_fd.puts "\n[GNUPG:] GOODSIG cert-fingerprint cert-subject" if file_descriptor_id
+
   rescue StandardError => e
-    log.puts "ERR: #{e.inspect}"
+    log.puts("ERR: #{e}")
+  end
+end
+
+#######################################################
+# Time to run something
+#######################################################
+Clamp do
+  option "--status-fd", "N", "write status messages to this file descriptor" do |fd|
+    Integer(fd) if fd
+  end
+  option "--verify", :flag, "verify a signature", default: false
+  option ["-s","--sign"], :flag, "Sign a message", default: true
+  option ["-b","--detached"], :flag, "Make a detached signature", default: false
+  option ["-a","--armor"], :flag, "ASCII armoured", default: false
+  option ["-u","--user"], "key-id", "Use name as the key to sign with", default: false
+
+  parameter "[input_one]", "optional input file for some commands"
+  parameter "[input_two]", "optional input file for some commands"
+
+  def execute
+    begin
+      if verify?
+        # gpgsm --verify $file - <$signature
+        execute_verify(file_descriptor_id: status_fd, signed_data_path: input_two, signature_path: input_one)
+      elsif sign?
+        # gpgsm -bsau $key
+        execute_sign(file_descriptor_id: status_fd)
+      else
+        $stderr.puts "no command found"
+        exit 1
+      end
+    rescue StandardError => e
+      File.open("sigstore-clamp.log", "wb") do |log|
+        log.puts("ERR: #{e}")
+      end
+    end
   end
 
 end
-
-# TODO confirm the commit author email matches the email we'll be signing with
-
-
-
