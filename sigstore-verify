@@ -1,0 +1,127 @@
+#!/usr/bin/env ruby
+FULCIO_ROOT =<<EOS
+-----BEGIN CERTIFICATE-----
+MIIB+DCCAX6gAwIBAgITNVkDZoCiofPDsy7dfm6geLbuhzAKBggqhkjOPQQDAzAq
+MRUwEwYDVQQKEwxzaWdzdG9yZS5kZXYxETAPBgNVBAMTCHNpZ3N0b3JlMB4XDTIx
+MDMwNzAzMjAyOVoXDTMxMDIyMzAzMjAyOVowKjEVMBMGA1UEChMMc2lnc3RvcmUu
+ZGV2MREwDwYDVQQDEwhzaWdzdG9yZTB2MBAGByqGSM49AgEGBSuBBAAiA2IABLSy
+A7Ii5k+pNO8ZEWY0ylemWDowOkNa3kL+GZE5Z5GWehL9/A9bRNA3RbrsZ5i0Jcas
+taRL7Sp5fp/jD5dxqc/UdTVnlvS16an+2Yfswe/QuLolRUCrcOE2+2iA5+tzd6Nm
+MGQwDgYDVR0PAQH/BAQDAgEGMBIGA1UdEwEB/wQIMAYBAf8CAQEwHQYDVR0OBBYE
+FMjFHQBBmiQpMlEk6w2uSu1KBtPsMB8GA1UdIwQYMBaAFMjFHQBBmiQpMlEk6w2u
+Su1KBtPsMAoGCCqGSM49BAMDA2gAMGUCMH8liWJfMui6vXXBhjDgY4MwslmN/TJx
+Ve/83WrFomwmNf056y1X48F9c4m3a3ozXAIxAKjRay5/aj/jsKKGIkmQatjI8uup
+Hr/+CxFvaJWmpYqNkLDGRU+9orzh5hI2RrcuaQ==
+-----END CERTIFICATE-----
+EOS
+
+require 'openssl'
+require 'base64'
+
+# TODO stop assuming we want to verify the HEAD commit
+data = `git cat-file commit HEAD`
+start_at = data.index("-----BEGIN SIGNED MESSAGE-----")
+end_at = data.index("-----END SIGNED MESSAGE-----")
+
+if start_at.nil?
+  $stderr.puts "No signature found"
+  exit 1
+end
+
+if end_at.nil?
+  $stderr.puts "No signature close found"
+  exit 1
+end
+
+end_at = end_at + 28
+pkcs7_text = data[start_at, end_at - start_at]
+signed_text = data.sub("gpgsig #{pkcs7_text}\n", "") 
+
+File.open("sigstore-data-to-verify.txt", "wb") do |to_verify|
+  to_verify.write(signed_text)
+end
+
+pkcs7_text = pkcs7_text.sub('-----BEGIN SIGNED MESSAGE-----', '')
+pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
+
+#puts Base64.decode64(pkcs7_text)
+p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+
+$stdout.write signed_text
+puts
+
+commit_epoch = signed_text[/committer.+ (\d+)/, 1].to_i
+
+if commit_epoch == 0
+  $stderr.puts "No commit timestamp found"
+  exit 1
+end
+commit_time = Time.at(commit_epoch)
+
+signer_certificate = nil
+
+p7.certificates.each do |cert|
+  signer_certificate = cert if cert.serial == p7.signers.first.serial
+end
+
+if signer_certificate.nil?
+  $stderr.puts "No certificate found for signature"
+  exit 1
+end
+puts "************************************"
+puts "signer cert"
+puts signer_certificate.inspect
+
+cert_store = OpenSSL::X509::Store.new
+# This will load the CA's from our system. We don't want that, we only want to verify
+# against the sigstore root
+#cert_store.set_default_paths
+
+root_cert = OpenSSL::X509::Certificate.new(FULCIO_ROOT)
+cert_store.add_cert(root_cert)
+
+# valid_signing_time? checks the time attributes already
+# this flag is required, otherwise expired certificates would become
+# unverified when notAfter within certificate attribute is reached
+cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
+
+# verify the signature has signed the commit, but don't check the key that did the signature
+# has been signed by a trusted CA
+puts "************************************"
+puts "valid signature"
+valid = p7.verify([], cert_store, signed_text, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
+puts valid
+if !valid
+  puts "err message: #{p7.error_string}"
+end
+
+puts "************************************"
+puts "valid signing time"
+valid_time = p7.signers.first.signed_time.between?(signer_certificate.not_before, signer_certificate.not_after) &&
+  p7.signers.first.signed_time >= commit_time
+
+puts valid_time
+
+puts "************************************"
+puts "certifcate trusted by sigstore/fulcio"
+valid = p7.verify([], cert_store, signed_text, OpenSSL::PKCS7::DETACHED)
+puts valid
+if !valid
+  puts "err message: #{p7.error_string}"
+end
+
+puts "************************************"
+puts "signing certifcate is for a @buildkite.com user"
+puts signer_certificate.subject
+
+subjectAltName = nil
+signer_certificate.extensions.each do |ext|
+  if ext.oid.to_s == "subjectAltName"
+    subjectAltName = ext.value.to_s
+  end
+end
+puts subjectAltName
+puts signer_certificate.subject.to_s.end_with?("@buildkite.com") || subjectAltName.to_s.end_with?("@buildkite.com")
+
+# TODO verify certificate hasn't been revoked - not on CRL
+# gitlab has some useful code we can probably use for inspiration https://gitlab.com/gitlab-org/gitlab/-/merge_requests/17773/diffs

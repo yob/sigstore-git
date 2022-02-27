@@ -1,0 +1,378 @@
+#!/usr/bin/env ruby
+
+require 'fileutils'
+
+SIGSTORE_CACHE_DIR = File.expand_path("~/.cache/sigstore")
+
+FULCIO_ROOT =<<EOS
+-----BEGIN CERTIFICATE-----
+MIIB+DCCAX6gAwIBAgITNVkDZoCiofPDsy7dfm6geLbuhzAKBggqhkjOPQQDAzAq
+MRUwEwYDVQQKEwxzaWdzdG9yZS5kZXYxETAPBgNVBAMTCHNpZ3N0b3JlMB4XDTIx
+MDMwNzAzMjAyOVoXDTMxMDIyMzAzMjAyOVowKjEVMBMGA1UEChMMc2lnc3RvcmUu
+ZGV2MREwDwYDVQQDEwhzaWdzdG9yZTB2MBAGByqGSM49AgEGBSuBBAAiA2IABLSy
+A7Ii5k+pNO8ZEWY0ylemWDowOkNa3kL+GZE5Z5GWehL9/A9bRNA3RbrsZ5i0Jcas
+taRL7Sp5fp/jD5dxqc/UdTVnlvS16an+2Yfswe/QuLolRUCrcOE2+2iA5+tzd6Nm
+MGQwDgYDVR0PAQH/BAQDAgEGMBIGA1UdEwEB/wQIMAYBAf8CAQEwHQYDVR0OBBYE
+FMjFHQBBmiQpMlEk6w2uSu1KBtPsMB8GA1UdIwQYMBaAFMjFHQBBmiQpMlEk6w2u
+Su1KBtPsMAoGCCqGSM49BAMDA2gAMGUCMH8liWJfMui6vXXBhjDgY4MwslmN/TJx
+Ve/83WrFomwmNf056y1X48F9c4m3a3ozXAIxAKjRay5/aj/jsKKGIkmQatjI8uup
+Hr/+CxFvaJWmpYqNkLDGRU+9orzh5hI2RrcuaQ==
+-----END CERTIFICATE-----
+EOS
+
+#######################################################
+# Cache of keys and signed certs
+#######################################################
+
+class SigstoreCache
+
+  def initialize(path)
+    @path = path
+    FileUtils.mkdir_p(SIGSTORE_CACHE_DIR)
+    # TODO ensure cache dir is chmod 600
+    clean_expired
+  end
+
+  def fetch
+    now_epoch = Time.now.to_i
+    current_cache = Dir.entries(@path).select { |entry|
+      entry.match(/\A\d+-\d+\z/)
+    }.select { |entry|
+      entry.split("-").last.to_i > now_epoch
+    }.sort.last
+    
+    if current_cache
+      this_path = File.join(@path, current_cache)
+
+      priv_key_path = File.join(this_path, "private.key")
+      cert_path = File.join(this_path, "sigstore.crt")
+
+      priv_key = OpenSSL::PKey::RSA.new(File.read(priv_key_path))
+      certToSign = OpenSSL::X509::Certificate.new(File.read(cert_path))
+
+      return priv_key, certToSign
+    end
+  end
+
+  def store(priv_key, cert)
+    raise ArgumentError, "priv_key (#{priv_key.class}) must be an OpenSSL::PKey" unless priv_key.is_a?(OpenSSL::PKey::RSA)
+    raise ArgumentError, "cert (#{cert.class}) must be an OpenSSL::X509::Certificate" unless cert.is_a?(OpenSSL::X509::Certificate)
+
+    # We expire data from the cache 60s before the certificate expires. In theory this should
+    # avoid race conditions where the cert is valid when we fetch it from the cache, but invalid
+    # when it signs the commit
+    from_epoch = cert.not_before.to_i
+    to_epoch = cert.not_after.to_i - 60
+
+    this_path = File.join(@path, "#{from_epoch}-#{to_epoch}")
+    FileUtils.mkdir_p(this_path)
+
+    priv_key_path = File.join(this_path, "private.key")
+    cert_path = File.join(this_path, "sigstore.crt")
+    File.open(priv_key_path, "wb") do |io|
+      io.write(priv_key.to_pem)
+    end
+    File.open(cert_path, "wb") do |io|
+      io.write(cert.to_pem)
+    end
+    # TODO ensure both files are chmod 600
+  end
+
+  private
+
+  def clean_expired
+    # TODO silenty delete cache dirs that have expired
+  end
+end
+#######################################################
+# Crypto
+#######################################################
+require 'base64'
+require 'openssl'
+
+class Crypto 
+  def initialize; end
+
+  def generate_keys
+    key = OpenSSL::PKey::RSA.generate(2048)
+    pkey = key.public_key
+    return [key, pkey, Base64.encode64(pkey.to_der)]
+  end
+
+  def sign_proof(priv_key, email)
+    proof = priv_key.sign(OpenSSL::Digest::SHA256.new, email)
+    return Base64.encode64(proof)
+  end
+end
+
+#######################################################
+# OpenIDHandler
+#######################################################
+
+require 'base64'
+require 'cgi'
+require 'digest'
+require 'json/jwt'
+require "launchy"
+require "openid_connect"
+
+class OpenIDHandler 
+  def initialize(priv_key)
+    @priv_key = priv_key
+  end
+
+  def get_token()
+    #config = SigStoreConfig.new().config
+    session = {}
+    session[:state] = SecureRandom.hex(16)
+    session[:nonce] = SecureRandom.hex(16)
+    oidc_discovery = OpenIDConnect::Discovery::Provider::Config.discover! "https://oauth2.sigstore.dev/auth"
+
+    # oidc_discovery gem doesn't support code_challenge_methods yet, so we will just blindly include
+    pkce = generate_pkce
+
+    # If development env, used a fixed port
+    #if config.development  == true
+    #  server = TCPServer.new 5678
+    #  server_addr = "5678"
+    #else
+      server = TCPServer.new 0
+      server_addr = server.addr[1].to_s
+    #end
+
+    webserv = Thread.new do
+      response = "You may close this browser"
+      response_code = "200 OK"
+      connection = server.accept
+      while (input = connection.gets)
+        begin
+          # VERB PATH HTTP/1.1
+          http_req = input.split(' ')
+          if http_req.length() != 3
+            raise "invalid HTTP request received on callback"
+          end
+          params = CGI.parse(URI.parse(http_req[1]).query)
+          if params["code"].length() != 1 or params["state"].length() != 1
+            raise "multiple values for code or state returned in callback; unable to process"
+          end
+          Thread.current[:code] = params["code"][0]
+          Thread.current[:state] = params["state"][0]
+        rescue StandardError => e
+          response = "Error processing request: #{e.message}"
+          response_code = "400 Bad Request"
+        end
+        connection.print "HTTP/1.1 #{response_code}\r\n" +
+          "Content-Type: text/plain\r\n" +
+          "Content-Length: #{response.bytesize}\r\n" +
+          "Connection: close\r\n"
+          connection.print "\r\n"
+          connection.print response
+          connection.close
+          if response_code != "200 OK"
+            raise response
+          end
+          break
+      end
+    ensure
+      server.close
+    end
+
+    webserv.abort_on_exception = true
+
+    client = OpenIDConnect::Client.new(
+      authorization_endpoint: oidc_discovery.authorization_endpoint,
+      identifier: "sigstore",
+      redirect_uri: "http://localhost:" + server_addr,
+      secret: "",
+      token_endpoint: oidc_discovery.token_endpoint,
+    )
+
+    authorization_uri = client.authorization_uri(
+      scope: ["openid", :email],
+      state: session[:state],
+      nonce: session[:nonce],
+      code_challenge_method: pkce[:method],
+      code_challenge: pkce[:challenge],
+    )
+
+    begin
+      Launchy.open(authorization_uri)
+    rescue
+      # NOTE: ignore any exception, as the URL is printed above and may be
+      #       opened manually
+      puts "Cannot open browser automatically, please click on the link below:"
+      puts ""
+      puts authorization_uri
+    end
+
+    webserv.join
+
+    # check state == webserv[:state]
+    if webserv[:state] != session[:state]
+      abort 'Invalid state value received from OIDC Provider'
+    end
+
+    client.authorization_code = webserv[:code]
+    access_token = client.access_token!({code_verifier: pkce[:value]})
+
+    provider_public_keys = oidc_discovery.jwks
+
+    token = verify_token(access_token, provider_public_keys, session[:nonce])
+
+    proof = Crypto.new().sign_proof(@priv_key, token["email"])
+    return proof, access_token
+  end
+
+  private
+
+  def generate_pkce()
+    pkce = {}
+    pkce[:method] = "S256"
+    # generate 43 <= x <= 128 character random string; the length below will generate a 2x hex length string
+    pkce[:value] = SecureRandom.hex(24)
+    # compute SHA256 hash and base64-urlencode hash
+    pkce[:challenge] = Base64.urlsafe_encode64(Digest::SHA256.digest(pkce[:value]), padding:false)
+    return pkce
+  end
+
+  def verify_token(access_token, public_keys, nonce)
+    begin
+      decoded_access_token = JSON::JWT.decode(access_token.to_s,public_keys)
+    rescue JSON::JWS::VerificationFailed => e
+      abort 'JWT Verification Failed: ' + e.to_s
+    else  #success
+      token = JSON.parse(decoded_access_token.to_json)
+    end
+    #puts token.inspect
+
+    # verify issuer matches
+    if token["iss"] != "https://oauth2.sigstore.dev/auth"
+      abort 'Mismatched issuer in OIDC ID Token'
+    end
+
+    # verify it was intended for me
+    if token["aud"] != "sigstore"
+      abort 'OIDC ID Token was not intended for this use'
+    end
+
+    # verify token has not expired (iat < now <= exp)
+    now = Time.now.to_i
+    if token["iat"] > now or now > token["exp"]
+      abort 'OIDC ID Token is expired'
+    end
+
+    # verify nonce if present in token
+    if token.key?("nonce") and token["nonce"] != nonce
+      abort 'OIDC ID Token has incorrect nonce value'
+    end
+
+    # ensure that the OIDC provider has verified the email address
+    # note: this may have happened some time in the past
+    if token["email_verified"] != true
+      abort 'Email address in OIDC token has not been verified by provider'
+    end
+
+    return token
+  end
+end
+
+#######################################################
+# HttpClient
+#######################################################
+
+require "faraday_middleware"
+require "openssl"
+
+class HttpClient
+  def initialize; end
+  def get_cert(id_token, proof, pub_key, fulcio_host)
+    connection = Faraday.new do |request|
+      request.request :authorization, 'Bearer', id_token.to_s
+      request.url_prefix = fulcio_host
+      request.request :json
+      request.response :json, content_type: /json/
+      request.adapter :net_http
+    end
+    fulcio_response = connection.post("/api/v1/signingCert", { publicKey: { content: pub_key, algorithm: "ecdsa" }, signedEmailAddress: proof})
+    return fulcio_response.body
+  end
+end
+
+# Fulcio root cert at https://raw.githubusercontent.com/sigstore/root-signing/main/repository/repository/targets/fulcio_v1.crt.pem
+
+cache = SigstoreCache.new(SIGSTORE_CACHE_DIR)
+
+priv_key, certToSign = cache.fetch
+if priv_key.nil? || certToSign.nil?
+  priv_key, pub_key, enc_pub_key = Crypto.new().generate_keys
+  proof, access_token = OpenIDHandler.new(priv_key).get_token
+  #puts "proof: #{proof}"
+  #puts "proof: #{Base64.decode64(proof)}"
+  #puts "access_token: #{access_token}"
+  #puts "access_token: #{Base64.decode64(access_token.to_s)}"
+  #puts ""
+  cert_response = HttpClient.new().get_cert(access_token, proof, enc_pub_key, "https://fulcio.sigstore.dev")
+  certPEM, rootPem = cert_response.split(/\n{2,}/)
+  #puts certPEM
+  certToSign = OpenSSL::X509::Certificate.new(certPEM)
+  cache.store(priv_key, certToSign)
+end
+
+status_fd = IO.for_fd(2)
+File.open("sigstore.log", "wb") do |log|
+  log.puts ARGV.inspect
+  data_to_sign = STDIN.read(1048576)
+  log.puts data_to_sign
+  File.open("sigstore-data-to-sign.txt", "wb") do |to_sign|
+    to_sign.write(data_to_sign)
+  end
+
+  begin
+    bundled_certs = [
+      OpenSSL::X509::Certificate.new(FULCIO_ROOT)
+    ]
+    signed = OpenSSL::PKCS7::sign(certToSign, priv_key, data_to_sign, bundled_certs, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::BINARY).to_s
+  rescue StandardError => e
+    log.puts "Signing failed: #{e}"
+    exit 1
+  end
+
+  signed = signed.sub("-----BEGIN PKCS7-----", "-----BEGIN SIGNED MESSAGE-----")
+  signed = signed.sub("-----END PKCS7-----", "-----END SIGNED MESSAGE-----")
+
+  log.puts "BEGIN_SIGNING"
+  log.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01"
+  log.puts signed
+
+  log.flush
+
+  status_fd.puts "BEGIN_SIGNING"
+  puts signed
+  status_fd.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01"
+
+  begin
+    # TEST
+    pkcs7_text = signed.sub('-----BEGIN SIGNED MESSAGE-----', '')
+    pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
+    p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+    
+    log.puts p7.inspect
+    log.puts p7.certificates.inspect
+    subjectAltName = nil
+    p7.certificates.first.extensions.each do |ext|
+      #puts "#{ext.inspect} #{ext.oid} #{ext.value}"
+      if ext.oid.to_s == "subjectAltName"
+        subjectAltName = ext.value.to_s
+      end
+    end
+    log.puts subjectAltName
+  rescue StandardError => e
+    log.puts "ERR: #{e.inspect}"
+  end
+
+end
+
+# TODO confirm the commit author email matches the email we'll be signing with
+
+
+
