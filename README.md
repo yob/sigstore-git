@@ -72,6 +72,21 @@ Certificates are only valid for 20 mins, so you'll need to do the OAuth dance ag
 need to sign another commit 20+ minutes since the last sign in. That's kind of inconvenient, but
 it is what it is.
 
+## TODO
+
+So far the CLI interface emulates the bits of gpgsm that git uses to sign and verify commits. I'd
+like to add a new mode that can be called in a CI environment to verify the signed identity of the
+user. Maybe something like this to accept any user from a trusted domain:
+
+    $ sigstore --validate-email-domain yob.id.au
+
+Or single users:
+
+    $ sigstore --validate-email james@yob.id.au --validate-email bob@example.com
+
+The output should be fairly verbose and clear about the identity found in the
+current commit, and if it's trusted then why we trust it. 
+
 ## Acknowledgements
 
 The OAuth bits of the code are based on earlier work in https://github.com/sigstore/ruby-sigstore/
