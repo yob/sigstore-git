@@ -34,6 +34,10 @@ Then configure a git repo to sign commits with this executable:
 When committing, add -S to have the commit signed. On first use a browser window will open and you'll
 be asked to do an OAuth sign in via GitHub, Google or Microsoft.
 
+Optionally, configure git to sign all commits without the -S flag:
+
+    git config --local commit.gpgsign true
+
 You can see the signature by printing the raw commit:
 
    $ git cat-file commit HEAD
