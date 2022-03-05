@@ -72,6 +72,47 @@ Certificates are only valid for 20 mins, so you'll need to do the OAuth dance ag
 need to sign another commit 20+ minutes since the last sign in. That's kind of inconvenient, but
 it is what it is.
 
+## OpenSSL
+
+Reference commands for manually verifying a commit signature with openssl. This is not useful to users of
+this tool, but it can be helpful during development for verification
+
+"git verify-commit HEAD" will call this program with two bits of data: the
+signature (in PKCS7 format) and the signed data from the commit object. Start
+by writing both these two two files: git-signature.bin and git-signed-data.bin.
+
+Update the signature to use the PKCS7 markers openssl requires:
+
+    $ cat git-signature.bin | sed "s/SIGNED MESSAGE/PKCS7/" > git-signature.pkcs7
+
+Extract the certificate that signed the data from the PKCS7 signature:
+
+    $ openssl pkcs7 -inform PEM -outform PEM -in git-signature.pkcs7 -print_certs > certs.txt
+
+There's probably multiple certificates in certs.txt - the one with a blank
+"subject=" is the signing certificate. Copy it into a new file,
+signing-cert.pem
+
+Fetch the fulcio CA certificate:
+
+    $ curl https://raw.githubusercontent.com/sigstore/root-signing/main/repository/repository/targets/fulcio_v1.crt.pem > fulcio_v1.crt.pem
+
+We're ready to verify it:
+
+    $ openssl smime -verify -CAfile fulcio_v1.crt.pem -inform PEM -certfile signing-cert.pem -in git-signature.pkcs7 -content git-signed-data.bin  -purpose any -no_check_time
+
+Most of the above command is somewhat obvious. However, these flags are with discussing.
+
+"-purpose any". Certificates signed by fulcio have a key usage exentsion value
+of "Digital Signature". "openssl smime" is unwilling to use certificates with
+that purpose to verify smime signatures, so we have to disable that rule.
+There's some more info at https://technotes.shemyak.com/posts/smimesign-extended-key-usage-extension-for-openssl-pkcs7-verification/
+
+"-no_check_time" fulcio signed certificates are only valid for 20 minutes. Assuming we're running
+these commands outside the 20 minute window, we must tell openssl to ignore the expired time. In
+real world verification of signed git commits, we probably want to confirm that the commit date
+is within the valid 20 minute period.
+
 ## TODO
 
 So far the CLI interface emulates the bits of gpgsm that git uses to sign and verify commits. I'd
