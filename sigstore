@@ -437,6 +437,8 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     # to ANY, verify() will ignore the usage extension when determining certificate validity
     cert_store.purpose = OpenSSL::X509::PURPOSE_ANY
 
+    valid_signature_and_chain = true
+
     # verify the signature has signed the commit, but don't check the key that did the signature
     # has been signed by a trusted CA
     log.puts "************************************"
@@ -444,6 +446,7 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     valid = p7.verify([], cert_store, signed_data, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
     log.puts valid
     if !valid
+      valid_signature_and_chain = false
       log.puts "err message: #{p7.error_string}"
     end
 
@@ -453,6 +456,9 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
       p7.signers.first.signed_time >= commit_time
 
     log.puts valid_time
+    if !valid_time
+      valid_signature_and_chain = false
+    end
 
     log.puts "************************************"
     log.puts "certificate trusted by sigstore/fulcio"
@@ -460,6 +466,7 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     log.puts valid
     if !valid
       log.puts "err message: #{p7.error_string}"
+      valid_signature_and_chain = false
     end
 
     log.puts "************************************"
@@ -478,8 +485,13 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     # TODO verify certificate hasn't been revoked - not on CRL
     # gitlab has some useful code we can probably use for inspiration https://gitlab.com/gitlab-org/gitlab/-/merge_requests/17773/diffs
 
-    #status_fd.puts "\n[GNUPG:] BADSIG cert-fingerprint cert-subject" if file_descriptor_id
-    status_fd.puts "\n[GNUPG:] GOODSIG cert-fingerprint cert-subject" if file_descriptor_id
+    if file_descriptor_id
+      if valid_signature_and_chain
+        status_fd.puts "\n[GNUPG:] GOODSIG cert-fingerprint cert-subject"
+      else
+        status_fd.puts "\n[GNUPG:] BADSIG cert-fingerprint cert-subject"
+      end
+    end
 
   rescue StandardError => e
     log.puts("ERR: #{e}")
