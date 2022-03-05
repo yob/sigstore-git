@@ -524,6 +524,138 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
   end
 end
 
+def execute_check(email_domain:, identity_provider:)
+  data = STDIN.read(1048576)
+  start_at = data.index("-----BEGIN SIGNED MESSAGE-----")
+  end_at = data.index("-----END SIGNED MESSAGE-----")
+
+  if start_at.nil?
+    $stderr.puts "No signature found"
+    exit 1
+  end
+
+  if end_at.nil?
+    $stderr.puts "No signature close found"
+    exit 1
+  end
+
+  end_at = end_at + 28
+  pkcs7_text = data[start_at, end_at - start_at]
+  signed_text = data.sub("gpgsig #{pkcs7_text}\n", "")
+
+  pkcs7_text = pkcs7_text.sub('-----BEGIN SIGNED MESSAGE-----', '')
+  pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
+
+  p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+
+  commit_epoch = signed_text[/committer.+ (\d+)/, 1].to_i
+
+  if commit_epoch == 0
+    $stderr.puts "No commit timestamp found"
+    exit 1
+  end
+  commit_time = Time.at(commit_epoch)
+
+  signer_certificate = nil
+
+  p7.certificates.each do |cert|
+    signer_certificate = cert if cert.serial == p7.signers.first.serial
+  end
+
+  if signer_certificate.nil?
+    $stderr.puts "No certificate found for signature"
+    exit 1
+  end
+
+  cert_store = OpenSSL::X509::Store.new
+
+  # This will load the CA's from our system. We don't want that, we only want to verify
+  # against the sigstore root
+  #cert_store.set_default_paths
+
+  root_cert = OpenSSL::X509::Certificate.new(FULCIO_ROOT)
+  cert_store.add_cert(root_cert)
+
+  # Don't validate the time on any certificates. They'll almost certainly have expired,
+  # because fulcio certificates are only valid for 20 minutes. We'll do our own check
+  # to confirm the commit time is within the certificate validity period
+  cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
+
+  # Certificates issued by fulcio have a specific usage indicated via extensions:
+  #
+  # $ openssl x509 -in cert-mine.pem -noout -text | head -n 39 | tail -n 5
+  #    X509v3 extensions:
+  #        X509v3 Key Usage: critical
+  #            Digital Signature
+  #        X509v3 Extended Key Usage:
+  #            Code Signing
+  #
+  # By default openssl doesn't consider these usages valid for PKCS7 signatures,
+  # so verify() will fail with an obscure error. By forcing the cert store purpose
+  # to ANY, verify() will ignore the usage extension when determining certificate validity
+  cert_store.purpose = OpenSSL::X509::PURPOSE_ANY
+
+  valid_signature_and_chain = true
+
+  # verify the signature has signed the commit, but don't check the key that did the signature
+  # has been signed by a trusted CA
+  puts "************************************"
+  puts "valid signature"
+  valid = p7.verify([], cert_store, signed_text, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
+  puts valid
+  if !valid
+    valid_signature_and_chain = false
+    puts "err message: #{p7.error_string}"
+  end
+
+  puts "************************************"
+  puts "valid signing time"
+  valid_time = p7.signers.first.signed_time.between?(signer_certificate.not_before, signer_certificate.not_after) &&
+    p7.signers.first.signed_time >= commit_time
+
+  puts valid_time
+  if !valid_time
+    valid_signature_and_chain = false
+  end
+
+  puts "************************************"
+  puts "certificate trusted by sigstore/fulcio"
+  valid = p7.verify([], cert_store, signed_text, OpenSSL::PKCS7::DETACHED)
+  puts valid
+  if !valid
+    puts "err message: #{p7.error_string}"
+    valid_signature_and_chain = false
+  end
+
+  fulcio_issued_cert = FulcioIssuedCertificate.new(signer_certificate)
+
+  if email_domain
+    puts "************************************"
+    puts "checking signing certificate from user at @#{email_domain}"
+    puts "signed identity: #{fulcio_issued_cert.identity}"
+    valid = fulcio_issued_cert.identity && fulcio_issued_cert.identity.ends_with?("@#{email_domain}")
+    if valid
+      puts "OK"
+    else
+      puts "FAILED"
+    end
+  end
+
+  if identity_provider
+    puts "************************************"
+    puts "checking identity provider is #{identity_provider}"
+    puts "signed identity from: #{fulcio_issued_cert.identity_provider}"
+    valid = fulcio_issued_cert.identity_provider && fulcio_issued_cert.identity_provider == identity_provider
+    if valid
+      puts "OK"
+    else
+      puts "FAILED"
+    end
+  end
+
+  # TODO implement "--signed-identity-must-match-committer-email"
+end
+
 #######################################################
 # Time to run something
 #######################################################
@@ -533,9 +665,13 @@ Clamp do
   end
   option "--verify", :flag, "verify a signature", default: false
   option ["-s","--sign"], :flag, "Sign a message", default: true
+  option "--check", :flag, "check a commit", default: false
   option ["-b","--detached"], :flag, "Make a detached signature", default: false
   option ["-a","--armor"], :flag, "ASCII armoured", default: false
   option ["-u","--user"], "key-id", "Use name as the key to sign with", default: false
+
+  option "--email-domain", "domain", "Confirm the commit is signed by someone from this domain"
+  option "--identity-provider", "url", "Confirm the commit is signed by an identity from this provider. Usually a URL"
 
   parameter "[input_one]", "optional input file for some commands"
   parameter "[input_two]", "optional input file for some commands"
@@ -545,6 +681,9 @@ Clamp do
       if verify?
         # gpgsm --verify $file - <$signature
         execute_verify(file_descriptor_id: status_fd, signed_data_path: input_two, signature_path: input_one)
+      elsif check?
+        # git cat-file commit HEAD | sigstore --check --email-domain yob.id.au  --issuer https://accounts.google.com
+        execute_check(email_domain: email_domain, identity_provider: identity_provider)
       elsif sign?
         # gpgsm -bsau $key
         execute_sign(file_descriptor_id: status_fd)
