@@ -324,10 +324,6 @@ def execute_sign(file_descriptor_id: nil)
     status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
     log.puts ARGV.inspect
     data_to_sign = STDIN.read(1048576)
-    log.puts data_to_sign
-    File.open("sigstore-data-to-sign.txt", "wb") do |to_sign|
-      to_sign.write(data_to_sign)
-    end
 
     begin
       bundled_certs = [ rootCert ]
@@ -379,9 +375,6 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
                      else
                        File.read(signature_path)
                      end
-
-    log.puts(signed_data)
-    log.puts(signature_data)
 
     pkcs7_text = signature_data.sub('-----BEGIN SIGNED MESSAGE-----', '')
     pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
