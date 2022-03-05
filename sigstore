@@ -330,9 +330,7 @@ def execute_sign(file_descriptor_id: nil)
     end
 
     begin
-      bundled_certs = [
-        OpenSSL::X509::Certificate.new(FULCIO_ROOT)
-      ]
+      bundled_certs = [ rootCert ]
       signed = OpenSSL::PKCS7::sign(certToSign, priv_key, data_to_sign, bundled_certs, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::BINARY).to_s
     rescue StandardError => e
       log.puts "Signing failed: #{e}"
