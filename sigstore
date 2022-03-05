@@ -47,17 +47,20 @@ class SigstoreCache
 
       priv_key_path = File.join(this_path, "private.key")
       cert_path = File.join(this_path, "sigstore.crt")
+      root_cert_path = File.join(this_path, "sigstore-root.crt")
 
       priv_key = OpenSSL::PKey::RSA.new(File.read(priv_key_path))
       certToSign = OpenSSL::X509::Certificate.new(File.read(cert_path))
+      rootCert = OpenSSL::X509::Certificate.new(File.read(root_cert_path))
 
-      return priv_key, certToSign
+      return priv_key, certToSign, rootCert
     end
   end
 
-  def store(priv_key, cert)
+  def store(priv_key, cert, root_cert)
     raise ArgumentError, "priv_key (#{priv_key.class}) must be an OpenSSL::PKey" unless priv_key.is_a?(OpenSSL::PKey::RSA)
     raise ArgumentError, "cert (#{cert.class}) must be an OpenSSL::X509::Certificate" unless cert.is_a?(OpenSSL::X509::Certificate)
+    raise ArgumentError, "root_cert (#{root_cert.class}) must be an OpenSSL::X509::Certificate" unless root_cert.is_a?(OpenSSL::X509::Certificate)
 
     # We expire data from the cache 60s before the certificate expires. In theory this should
     # avoid race conditions where the cert is valid when we fetch it from the cache, but invalid
@@ -70,11 +73,15 @@ class SigstoreCache
 
     priv_key_path = File.join(this_path, "private.key")
     cert_path = File.join(this_path, "sigstore.crt")
+    root_cert_path = File.join(this_path, "sigstore-root.crt")
     File.open(priv_key_path, "wb") do |io|
       io.write(priv_key.to_pem)
     end
     File.open(cert_path, "wb") do |io|
       io.write(cert.to_pem)
+    end
+    File.open(root_cert_path, "wb") do |io|
+      io.write(root_cert.to_pem)
     end
     # TODO ensure both files are chmod 600
   end
@@ -302,18 +309,19 @@ end
 def execute_sign(file_descriptor_id: nil)
   cache = SigstoreCache.new(SIGSTORE_CACHE_DIR)
 
-  priv_key, certToSign = cache.fetch
-  if priv_key.nil? || certToSign.nil?
-    priv_key, pub_key, enc_pub_key = Crypto.new().generate_keys
-    proof, access_token = OpenIDHandler.new(priv_key).get_token
-    cert_response = HttpClient.new().get_cert(access_token, proof, enc_pub_key, "https://fulcio.sigstore.dev")
-    certPEM, rootPem = cert_response.split(/\n{2,}/)
-    certToSign = OpenSSL::X509::Certificate.new(certPEM)
-    cache.store(priv_key, certToSign)
-  end
-
-  status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
   File.open("sigstore-execute-sign.log", "wb") do |log|
+    priv_key, certToSign, rootCert = cache.fetch
+    if priv_key.nil? || certToSign.nil? || rootCert.nil?
+      priv_key, pub_key, enc_pub_key = Crypto.new().generate_keys
+      proof, access_token = OpenIDHandler.new(priv_key).get_token
+      cert_response = HttpClient.new().get_cert(access_token, proof, enc_pub_key, "https://fulcio.sigstore.dev")
+      certPEM, rootPem = cert_response.scan(/-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----/m)
+      certToSign = OpenSSL::X509::Certificate.new(certPEM)
+      rootCert = OpenSSL::X509::Certificate.new(rootPem)
+      cache.store(priv_key, certToSign, rootCert)
+    end
+
+    status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
     log.puts ARGV.inspect
     data_to_sign = STDIN.read(1048576)
     log.puts data_to_sign
