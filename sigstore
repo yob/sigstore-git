@@ -314,6 +314,38 @@ class HttpClient
   end
 end
 
+#######################################################
+# FulcioIssuedCertificate
+#######################################################
+class FulcioIssuedCertificate
+  def initialize(cert)
+    raise ArgumentError, "cert (#{cert.class}) must be an OpenSSL::X509::Certificate" unless cert.is_a?(OpenSSL::X509::Certificate)
+    @cert = cert
+  end
+
+  def fingerprint
+    OpenSSL::Digest::SHA1.new(@cert.to_der).to_s
+  end
+
+  def identity
+    @cert.extensions.each do |ext|
+      if ext.oid.to_s == "subjectAltName"
+        return ext.value.to_s.sub(/\Aemail:/, "")
+      end
+    end
+    nil
+  end
+
+  def identity_provider
+    @cert.extensions.each do |ext|
+      if ext.oid.to_s == "1.3.6.1.4.1.57264.1.1"
+        return ext.value.to_s
+      end
+    end
+    nil
+  end
+end
+
 def execute_sign(file_descriptor_id: nil)
   cache = SigstoreCache.new(SIGSTORE_CACHE_DIR)
 
@@ -471,27 +503,19 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
       valid_signature_and_chain = false
     end
 
+    fulcio_issued_cert = FulcioIssuedCertificate.new(signer_certificate)
     log.puts "************************************"
     log.puts "signing certificate is for a @buildkite.com user"
-    log.puts signer_certificate.subject
-
-    subjectAltName = nil
-    signer_certificate.extensions.each do |ext|
-      if ext.oid.to_s == "subjectAltName"
-        subjectAltName = ext.value.to_s
-      end
-    end
-    log.puts subjectAltName
-    log.puts signer_certificate.subject.to_s.end_with?("@buildkite.com") || subjectAltName.to_s.end_with?("@buildkite.com")
+    log.puts "#{fulcio_issued_cert.identity} (#{fulcio_issued_cert.identity_provider})"
 
     # TODO verify certificate hasn't been revoked - not on CRL
     # gitlab has some useful code we can probably use for inspiration https://gitlab.com/gitlab-org/gitlab/-/merge_requests/17773/diffs
 
     if file_descriptor_id
       if valid_signature_and_chain
-        status_fd.puts "\n[GNUPG:] GOODSIG cert-fingerprint cert-subject"
+        status_fd.puts "\n[GNUPG:] GOODSIG #{fulcio_issued_cert.fingerprint} #{fulcio_issued_cert.identity} (#{fulcio_issued_cert.identity_provider})"
       else
-        status_fd.puts "\n[GNUPG:] BADSIG cert-fingerprint cert-subject"
+        status_fd.puts "\n[GNUPG:] BADSIG #{fulcio_issued_cert.fingerprint} #{fulcio_issued_cert.identity} (#{fulcio_issued_cert.identity_provider})"
       end
     end
 
