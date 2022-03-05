@@ -412,6 +412,7 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     log.puts signer_certificate.inspect
 
     cert_store = OpenSSL::X509::Store.new
+
     # This will load the CA's from our system. We don't want that, we only want to verify
     # against the sigstore root
     #cert_store.set_default_paths
@@ -419,9 +420,9 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     root_cert = OpenSSL::X509::Certificate.new(FULCIO_ROOT)
     cert_store.add_cert(root_cert)
 
-    # valid_signing_time? checks the time attributes already
-    # this flag is required, otherwise expired certificates would become
-    # unverified when notAfter within certificate attribute is reached
+    # Don't validate the time on any certificates. They'll almost certainly have expired,
+    # because fulcio certificates are only valid for 20 minutes. We'll do our own check
+    # to confirm the commit time is within the certificate validity period
     cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
 
     # Certificates issued by fulcio have a specific usage indicated via extensions:
