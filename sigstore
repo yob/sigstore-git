@@ -351,27 +351,6 @@ def execute_sign(file_descriptor_id: nil)
     status_fd.puts "BEGIN_SIGNING" if file_descriptor_id
     puts signed
     status_fd.puts "[GNUPG:] SIG_CREATED D \x01 \x02 0 #{Time.now.to_i} \x01\x01" if file_descriptor_id
-
-    begin
-      # TEST
-      pkcs7_text = signed.sub('-----BEGIN SIGNED MESSAGE-----', '')
-      pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
-      p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
-
-      log.puts p7.inspect
-      log.puts p7.certificates.inspect
-      subjectAltName = nil
-      p7.certificates.first.extensions.each do |ext|
-        #puts "#{ext.inspect} #{ext.oid} #{ext.value}"
-        if ext.oid.to_s == "subjectAltName"
-          subjectAltName = ext.value.to_s
-        end
-      end
-      log.puts subjectAltName
-    rescue StandardError => e
-      log.puts "ERR: #{e.inspect}"
-    end
-
   end
   # TODO confirm the commit author email matches the email we'll be signing with
 rescue StandardError => e
