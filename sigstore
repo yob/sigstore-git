@@ -30,7 +30,6 @@ class SigstoreCache
   def initialize(path)
     @path = path
     FileUtils.mkdir_p(SIGSTORE_CACHE_DIR)
-    # TODO ensure cache dir is chmod 600
     clean_expired
   end
 
@@ -83,7 +82,9 @@ class SigstoreCache
     File.open(root_cert_path, "wb") do |io|
       io.write(root_cert.to_pem)
     end
-    # TODO ensure both files are chmod 600
+    FileUtils.chmod(0600, priv_key_path)
+    FileUtils.chmod(0600, cert_path)
+    FileUtils.chmod(0600, root_cert_path)
   end
 
   private
