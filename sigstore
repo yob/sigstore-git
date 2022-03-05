@@ -423,6 +423,20 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     # unverified when notAfter within certificate attribute is reached
     cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
 
+    # Certificates issued by fulcio have a specific usage indicated via extensions:
+    #
+    # $ openssl x509 -in cert-mine.pem -noout -text | head -n 39 | tail -n 5
+    #    X509v3 extensions:
+    #        X509v3 Key Usage: critical
+    #            Digital Signature
+    #        X509v3 Extended Key Usage:
+    #            Code Signing
+    #
+		# By default openssl doesn't consider these usages valid for PKCS7 signatures,
+    # so verify() will fail with an obscure error. By forcing the cert store purpose
+    # to ANY, verify() will ignore the usage extension when determining certificate validity
+    cert_store.purpose = OpenSSL::X509::PURPOSE_ANY
+
     # verify the signature has signed the commit, but don't check the key that did the signature
     # has been signed by a trusted CA
     log.puts "************************************"
