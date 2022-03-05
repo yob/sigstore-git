@@ -89,7 +89,14 @@ class SigstoreCache
   private
 
   def clean_expired
-    # TODO silenty delete cache dirs that have expired
+    now_epoch = Time.now.to_i
+    current_cache = Dir.entries(@path).select { |entry|
+      entry.match(/\A\d+-\d+\z/)
+    }.select { |entry|
+      entry.split("-").last.to_i <= now_epoch
+    }.each { |entry|
+      FileUtils.rm_r(File.join(@path, entry))
+    }
   end
 end
 #######################################################
