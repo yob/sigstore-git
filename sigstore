@@ -393,55 +393,102 @@ rescue StandardError => e
   end
 end
 
-def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_id: nil)
-  raise ArgumentError, "signed_data_path is required" if signed_data_path.nil?
-  raise ArgumentError, "signature_path is required" if signature_path.nil?
+#######################################################
+# FulcioSignedCommit
+#######################################################
+class FulcioSignedCommit
 
-  require 'openssl'
-  require 'base64'
-  File.open("sigstore-execute-verify.log", "wb") do |log|
-    status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
+  class Stage
+    attr_reader :success, :message, :debug
 
-    log.puts("signed_data_path: #{signed_data_path}")
-    log.puts("signature_path: #{signature_path}")
+    def initialize(success, message, debug)
+      @success, @message, @debug = success, message, debug
+    end
 
-    signed_data = if signed_data_path == "-"
-                    STDIN.read(1048576)
-                  else
-                    File.read(signed_data_path)
-                  end
-    signature_data = if signature_path == "-"
-                       STDIN.read(1048576)
-                     else
-                       File.read(signature_path)
-                     end
+    def success?
+      @success
+    end
+
+    def check_cross
+      success? ? "✓" : "✖"
+    end
+  end
+
+  class Result
+    def initialize
+      @stages = []
+    end
+
+    def add_stage(success, message, debug: nil)
+      # TODO store debug and make it available somehow
+      @stages << Stage.new(success, message, debug)
+    end
+
+    def success?
+      @stages.all? { |stage| stage.success? }
+    end
+
+    def to_s
+      str = ""
+      @stages.each do |stage|
+        str << "#{stage.check_cross} #{stage.message}" 
+        str << " (#{stage.debug})" if stage.debug
+        str << "\n"
+      end
+      str
+    end
+
+    def error_msg
+      @error_msg
+    end
+  end
+
+  def initialize(signature_data:, signed_data:)
+    @signature_data, @signed_data = signature_data, signed_data
 
     pkcs7_text = signature_data.sub('-----BEGIN SIGNED MESSAGE-----', '')
     pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
 
-    p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+    @p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+  end
 
-    commit_epoch = signed_data[/committer.+ (\d+)/, 1].to_i
+  def fingerprint
+    signer_fulcio_certificate&.fingerprint
+  end
 
+  def identity
+    signer_fulcio_certificate&.identity
+  end
+
+  def identity_provider
+    signer_fulcio_certificate&.identity_provider
+  end
+
+  def signer_fulcio_certificate
+    return nil if signer_certificate.nil?
+
+    fulcio_cert = FulcioIssuedCertificate.new(signer_certificate)
+  end
+
+  def validate
+    result = Result.new
+
+    commit_epoch = @signed_data[/committer.+ (\d+)/, 1].to_i
+
+    # Without a commit time we can't validate the commit, bail early
     if commit_epoch == 0
-      $stderr.puts "No commit timestamp found"
-      exit 1
-    end
-    commit_time = Time.at(commit_epoch)
-
-    signer_certificate = nil
-
-    p7.certificates.each do |cert|
-      signer_certificate = cert if cert.serial == p7.signers.first.serial
+      result.add_stage(false, "Commit timestamp missing")
+      return result
     end
 
+    # If the certificate that goes with the private key that signed the commit isn't bundled
+    # in, then we can proceed, bail early
     if signer_certificate.nil?
-      $stderr.puts "No certificate found for signature"
-      exit 1
+      result.add_stage(false, "Certificate for signature not found")
+      return result
     end
-    log.puts "************************************"
-    log.puts "signer cert"
-    log.puts signer_certificate.inspect
+
+    commit_time = Time.at(commit_epoch)
 
     cert_store = OpenSSL::X509::Store.new
 
@@ -471,51 +518,102 @@ def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_i
     # to ANY, verify() will ignore the usage extension when determining certificate validity
     cert_store.purpose = OpenSSL::X509::PURPOSE_ANY
 
-    valid_signature_and_chain = true
 
     # verify the signature has signed the commit, but don't check the key that did the signature
     # has been signed by a trusted CA
-    log.puts "************************************"
-    log.puts "valid signature"
-    valid = p7.verify([], cert_store, signed_data, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
-    log.puts valid
-    if !valid
-      valid_signature_and_chain = false
-      log.puts "err message: #{p7.error_string}"
+    valid = @p7.verify([], cert_store, @signed_data, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
+    if valid
+      result.add_stage(valid, "Signature confirms commit is unchanged")
+    else
+      result.add_stage(valid, "Signature confirms commit is unchanged", debug: @p7.error_string)
     end
 
-    log.puts "************************************"
-    log.puts "valid signing time"
-    valid_time = p7.signers.first.signed_time.between?(signer_certificate.not_before, signer_certificate.not_after) &&
-      p7.signers.first.signed_time >= commit_time
+    valid_time = @p7.signers.first.signed_time.between?(signer_certificate.not_before, signer_certificate.not_after) &&
+      @p7.signers.first.signed_time >= commit_time
+    result.add_stage(valid_time, "Commit time is within certificate valid period")
 
-    log.puts valid_time
-    if !valid_time
-      valid_signature_and_chain = false
+    valid = @p7.verify([], cert_store, @signed_data, OpenSSL::PKCS7::DETACHED)
+    if valid
+      result.add_stage(valid, "Signature created by sigstore issued certificate")
+    else
+      result.add_stage(valid, "Signature created by sigstore issued certificate", debug: @p7.error_string)
     end
 
-    log.puts "************************************"
-    log.puts "certificate trusted by sigstore/fulcio"
-    valid = p7.verify([], cert_store, signed_data, OpenSSL::PKCS7::DETACHED)
-    log.puts valid
-    if !valid
-      log.puts "err message: #{p7.error_string}"
-      valid_signature_and_chain = false
+    result
+  end
+
+  def validate_and_check(require_email_domain: nil, require_identity_provider: nil)
+    # First we do the standard checks to confirm the signature and trust chain is valid
+    result = validate
+
+    result.add_stage(!identity.nil?, "Signature identity: #{identity}")
+    result.add_stage(!identity_provider.nil?, "Signature identity provider: #{identity_provider}")
+
+    # Now we can go on make the users assertions against the validated identity
+    if require_email_domain
+      valid = identity && identity.ends_with?("@#{require_email_domain}")
+      result.add_stage(valid, "Signature by user at @#{require_email_domain}")
     end
 
-    fulcio_issued_cert = FulcioIssuedCertificate.new(signer_certificate)
-    log.puts "************************************"
-    log.puts "signing certificate is for a @buildkite.com user"
-    log.puts "#{fulcio_issued_cert.identity} (#{fulcio_issued_cert.identity_provider})"
+    if require_identity_provider
+      valid = identity_provider && identity_provider == require_identity_provider
+      result.add_stage(valid, "Identity provider is #{require_identity_provider}")
+    end
+
+    result
+  end
+
+
+  private
+
+  def signer_certificate
+    @signer_certificate ||= begin
+                             res = nil
+                             @p7.certificates.each do |cert|
+                               res = cert if cert.serial == @p7.signers.first.serial
+                             end
+                             res
+                           end
+  end
+end
+
+
+def execute_verify(signed_data_path: nil, signature_path: nil, file_descriptor_id: nil)
+  raise ArgumentError, "signed_data_path is required" if signed_data_path.nil?
+  raise ArgumentError, "signature_path is required" if signature_path.nil?
+
+  require 'openssl'
+  require 'base64'
+  File.open("sigstore-execute-verify.log", "wb") do |log|
+    status_fd = IO.for_fd(file_descriptor_id) if file_descriptor_id
+
+    log.puts("signed_data_path: #{signed_data_path}")
+    log.puts("signature_path: #{signature_path}")
+
+    signed_data = if signed_data_path == "-"
+                    STDIN.read(1048576)
+                  else
+                    File.read(signed_data_path)
+                  end
+    signature_data = if signature_path == "-"
+                       STDIN.read(1048576)
+                     else
+                       File.read(signature_path)
+                     end
+
+    signed_commit = FulcioSignedCommit.new(signature_data: signature_data, signed_data: signed_data)
+    result = signed_commit.validate
+
+    log.puts result.to_s
 
     # TODO verify certificate hasn't been revoked - not on CRL
     # gitlab has some useful code we can probably use for inspiration https://gitlab.com/gitlab-org/gitlab/-/merge_requests/17773/diffs
 
     if file_descriptor_id
-      if valid_signature_and_chain
-        status_fd.puts "\n[GNUPG:] GOODSIG #{fulcio_issued_cert.fingerprint} #{fulcio_issued_cert.identity} (#{fulcio_issued_cert.identity_provider})"
+      if result.success?
+        status_fd.puts "\n[GNUPG:] GOODSIG #{signed_commit.fingerprint} #{signed_commit.identity} (#{signed_commit.identity_provider})"
       else
-        status_fd.puts "\n[GNUPG:] BADSIG #{fulcio_issued_cert.fingerprint} #{fulcio_issued_cert.identity} (#{fulcio_issued_cert.identity_provider})"
+        status_fd.puts "\n[GNUPG:] BADSIG #{signed_commit.fingerprint} #{signed_commit.identity} (#{signed_commit.identity_provider})"
       end
     end
 
@@ -529,128 +627,36 @@ def execute_check(email_domain:, identity_provider:)
   start_at = data.index("-----BEGIN SIGNED MESSAGE-----")
   end_at = data.index("-----END SIGNED MESSAGE-----")
 
-  if start_at.nil?
-    $stderr.puts "No signature found"
-    exit 1
-  end
+  File.open("sigstore-execute-check.log", "wb") do |log|
 
-  if end_at.nil?
-    $stderr.puts "No signature close found"
-    exit 1
-  end
+    if start_at.nil?
+      $stderr.puts "No signature found"
+      exit 1
+    end
 
-  end_at = end_at + 28
-  pkcs7_text = data[start_at, end_at - start_at]
-  signed_text = data.sub("gpgsig #{pkcs7_text}\n", "")
+    if end_at.nil?
+      $stderr.puts "No signature close found"
+      exit 1
+    end
 
-  pkcs7_text = pkcs7_text.sub('-----BEGIN SIGNED MESSAGE-----', '')
-  pkcs7_text = pkcs7_text.sub('-----END SIGNED MESSAGE-----', '')
+    end_at = end_at + 28
+    pkcs7_text = data[start_at, end_at - start_at]
+    signed_text = data.sub("gpgsig #{pkcs7_text}\n", "")
 
-  p7 = OpenSSL::PKCS7.new(Base64.decode64(pkcs7_text))
+    signed_commit = FulcioSignedCommit.new(signature_data: pkcs7_text, signed_data: signed_text)
+    result = signed_commit.validate_and_check(require_email_domain: email_domain, require_identity_provider: identity_provider)
 
-  commit_epoch = signed_text[/committer.+ (\d+)/, 1].to_i
+    puts result.to_s
 
-  if commit_epoch == 0
-    $stderr.puts "No commit timestamp found"
-    exit 1
-  end
-  commit_time = Time.at(commit_epoch)
-
-  signer_certificate = nil
-
-  p7.certificates.each do |cert|
-    signer_certificate = cert if cert.serial == p7.signers.first.serial
-  end
-
-  if signer_certificate.nil?
-    $stderr.puts "No certificate found for signature"
-    exit 1
-  end
-
-  cert_store = OpenSSL::X509::Store.new
-
-  # This will load the CA's from our system. We don't want that, we only want to verify
-  # against the sigstore root
-  #cert_store.set_default_paths
-
-  root_cert = OpenSSL::X509::Certificate.new(FULCIO_ROOT)
-  cert_store.add_cert(root_cert)
-
-  # Don't validate the time on any certificates. They'll almost certainly have expired,
-  # because fulcio certificates are only valid for 20 minutes. We'll do our own check
-  # to confirm the commit time is within the certificate validity period
-  cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
-
-  # Certificates issued by fulcio have a specific usage indicated via extensions:
-  #
-  # $ openssl x509 -in cert-mine.pem -noout -text | head -n 39 | tail -n 5
-  #    X509v3 extensions:
-  #        X509v3 Key Usage: critical
-  #            Digital Signature
-  #        X509v3 Extended Key Usage:
-  #            Code Signing
-  #
-  # By default openssl doesn't consider these usages valid for PKCS7 signatures,
-  # so verify() will fail with an obscure error. By forcing the cert store purpose
-  # to ANY, verify() will ignore the usage extension when determining certificate validity
-  cert_store.purpose = OpenSSL::X509::PURPOSE_ANY
-
-  valid_signature_and_chain = true
-
-  # verify the signature has signed the commit, but don't check the key that did the signature
-  # has been signed by a trusted CA
-  puts "************************************"
-  puts "valid signature"
-  valid = p7.verify([], cert_store, signed_text, OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::NOVERIFY)
-  puts valid
-  if !valid
-    valid_signature_and_chain = false
-    puts "err message: #{p7.error_string}"
-  end
-
-  puts "************************************"
-  puts "valid signing time"
-  valid_time = p7.signers.first.signed_time.between?(signer_certificate.not_before, signer_certificate.not_after) &&
-    p7.signers.first.signed_time >= commit_time
-
-  puts valid_time
-  if !valid_time
-    valid_signature_and_chain = false
-  end
-
-  puts "************************************"
-  puts "certificate trusted by sigstore/fulcio"
-  valid = p7.verify([], cert_store, signed_text, OpenSSL::PKCS7::DETACHED)
-  puts valid
-  if !valid
-    puts "err message: #{p7.error_string}"
-    valid_signature_and_chain = false
-  end
-
-  fulcio_issued_cert = FulcioIssuedCertificate.new(signer_certificate)
-
-  if email_domain
-    puts "************************************"
-    puts "checking signing certificate from user at @#{email_domain}"
-    puts "signed identity: #{fulcio_issued_cert.identity}"
-    valid = fulcio_issued_cert.identity && fulcio_issued_cert.identity.ends_with?("@#{email_domain}")
-    if valid
+    if result.success?
       puts "OK"
     else
-      puts "FAILED"
+      puts "FAIL"
+      exit 1
     end
-  end
 
-  if identity_provider
-    puts "************************************"
-    puts "checking identity provider is #{identity_provider}"
-    puts "signed identity from: #{fulcio_issued_cert.identity_provider}"
-    valid = fulcio_issued_cert.identity_provider && fulcio_issued_cert.identity_provider == identity_provider
-    if valid
-      puts "OK"
-    else
-      puts "FAILED"
-    end
+  rescue StandardError => e
+    log.puts("ERR: #{e}")
   end
 
   # TODO implement "--signed-identity-must-match-committer-email"
