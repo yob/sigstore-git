@@ -5,7 +5,7 @@ require 'fileutils'
 
 SIGSTORE_CACHE_DIR = File.expand_path("~/.cache/sigstore")
 
-FULCIO_ROOT =<<EOS
+FULCIO_ROOT_V1 =<<EOS
 -----BEGIN CERTIFICATE-----
 MIIB9zCCAXygAwIBAgIUALZNAPFdxHPwjeDloDwyYChAO/4wCgYIKoZIzj0EAwMw
 KjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0y
@@ -18,6 +18,22 @@ wB5fkUWlZql6zJChkyLQKsXF+jAfBgNVHSMEGDAWgBRYwB5fkUWlZql6zJChkyLQ
 KsXF+jAKBggqhkjOPQQDAwNpADBmAjEAj1nHeXZp+13NWBNa+EDsDP8G1WWg1tCM
 WP/WHPqpaVo0jhsweNFZgSs0eE7wYI4qAjEA2WB9ot98sIkoF3vZYdd3/VtWB5b9
 TNMea7Ix/stJ5TfcLLeABLE4BNJOsQ4vnBHJ
+-----END CERTIFICATE-----
+EOS
+
+FULCIO_ROOT =<<EOS
+-----BEGIN CERTIFICATE-----
+MIIB+DCCAX6gAwIBAgITNVkDZoCiofPDsy7dfm6geLbuhzAKBggqhkjOPQQDAzAq
+MRUwEwYDVQQKEwxzaWdzdG9yZS5kZXYxETAPBgNVBAMTCHNpZ3N0b3JlMB4XDTIx
+MDMwNzAzMjAyOVoXDTMxMDIyMzAzMjAyOVowKjEVMBMGA1UEChMMc2lnc3RvcmUu
+ZGV2MREwDwYDVQQDEwhzaWdzdG9yZTB2MBAGByqGSM49AgEGBSuBBAAiA2IABLSy
+A7Ii5k+pNO8ZEWY0ylemWDowOkNa3kL+GZE5Z5GWehL9/A9bRNA3RbrsZ5i0Jcas
+taRL7Sp5fp/jD5dxqc/UdTVnlvS16an+2Yfswe/QuLolRUCrcOE2+2iA5+tzd6Nm
+MGQwDgYDVR0PAQH/BAQDAgEGMBIGA1UdEwEB/wQIMAYBAf8CAQEwHQYDVR0OBBYE
+FMjFHQBBmiQpMlEk6w2uSu1KBtPsMB8GA1UdIwQYMBaAFMjFHQBBmiQpMlEk6w2u
+Su1KBtPsMAoGCCqGSM49BAMDA2gAMGUCMH8liWJfMui6vXXBhjDgY4MwslmN/TJx
+Ve/83WrFomwmNf056y1X48F9c4m3a3ozXAIxAKjRay5/aj/jsKKGIkmQatjI8uup
+Hr/+CxFvaJWmpYqNkLDGRU+9orzh5hI2RrcuaQ==
 -----END CERTIFICATE-----
 EOS
 
@@ -490,11 +506,15 @@ class FulcioSignedCommit
 
     commit_time = Time.at(commit_epoch)
 
+    cert_store_v1 = OpenSSL::X509::Store.new
     cert_store = OpenSSL::X509::Store.new
 
     # This will load the CA's from our system. We don't want that, we only want to verify
     # against the sigstore root
     #cert_store.set_default_paths
+
+    root_cert_v1 = OpenSSL::X509::Certificate.new(FULCIO_ROOT_V1)
+    cert_store_v1.add_cert(root_cert_v1)
 
     root_cert = OpenSSL::X509::Certificate.new(FULCIO_ROOT)
     cert_store.add_cert(root_cert)
@@ -503,6 +523,7 @@ class FulcioSignedCommit
     # because fulcio certificates are only valid for 20 minutes. We'll do our own check
     # to confirm the commit time is within the certificate validity period
     cert_store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
+    cert_store_v1.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
 
     # Certificates issued by fulcio have a specific usage indicated via extensions:
     #
@@ -517,6 +538,7 @@ class FulcioSignedCommit
     # so verify() will fail with an obscure error. By forcing the cert store purpose
     # to ANY, verify() will ignore the usage extension when determining certificate validity
     cert_store.purpose = OpenSSL::X509::PURPOSE_ANY
+    cert_store_v1.purpose = OpenSSL::X509::PURPOSE_ANY
 
 
     # verify the signature has signed the commit, but don't check the key that did the signature
@@ -532,7 +554,7 @@ class FulcioSignedCommit
       @p7.signers.first.signed_time >= commit_time
     result.add_stage(valid_time, "Commit time is within certificate valid period")
 
-    valid = @p7.verify([], cert_store, @signed_data, OpenSSL::PKCS7::DETACHED)
+    valid = @p7.verify([], cert_store_v1, @signed_data, OpenSSL::PKCS7::DETACHED) || @p7.verify([], cert_store, @signed_data, OpenSSL::PKCS7::DETACHED)
     if valid
       result.add_stage(valid, "Signature created by sigstore issued certificate")
     else
