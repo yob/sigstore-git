@@ -131,3 +131,7 @@ current commit, and if it's trusted then why we trust it.
 ## Acknowledgements
 
 The OAuth bits of the code are based on earlier work in https://github.com/sigstore/ruby-sigstore/
+
+## Further Reading
+
+* https://dlorenc.medium.com/should-you-sign-git-commits-f068b07e1b1f
