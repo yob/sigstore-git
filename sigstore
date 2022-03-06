@@ -415,18 +415,26 @@ end
 class FulcioSignedCommit
 
   class Stage
-    attr_reader :success, :message, :debug
+    attr_reader :level, :message, :debug
 
-    def initialize(success, message, debug)
-      @success, @message, @debug = success, message, debug
+    def initialize(level, message, debug)
+      level = :success if level.is_a?(TrueClass)
+      level = :fail if level.is_a?(FalseClass)
+      @level, @message, @debug = level, message, debug
     end
 
     def success?
-      @success
+      @level != :fail
     end
 
     def check_cross
-      success? ? "✓" : "✖"
+      case @level
+      when :success then "✓"
+      when :info    then "ℹ"
+      when :fail    then "✖"
+      else
+        raise "Invalid level: #{@level})"
+      end
     end
   end
 
@@ -447,7 +455,7 @@ class FulcioSignedCommit
     def to_s
       str = ""
       @stages.each do |stage|
-        str << "#{stage.check_cross} #{stage.message}" 
+        str << "#{stage.check_cross} #{stage.message}"
         str << " (#{stage.debug})" if stage.debug
         str << "\n"
       end
@@ -568,8 +576,8 @@ class FulcioSignedCommit
     # First we do the standard checks to confirm the signature and trust chain is valid
     result = validate
 
-    result.add_stage(!identity.nil?, "Signature identity: #{identity}")
-    result.add_stage(!identity_provider.nil?, "Signature identity provider: #{identity_provider}")
+    result.add_stage(:info, "Signature identity: #{identity}")
+    result.add_stage(:info, "Signature identity provider: #{identity_provider}")
 
     # Now we can go on make the users assertions against the validated identity
     if require_email_domain
