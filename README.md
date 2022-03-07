@@ -136,3 +136,4 @@ The OAuth bits of the code are based on earlier work in https://github.com/sigst
 
 * https://dlorenc.medium.com/should-you-sign-git-commits-f068b07e1b1f
 * https://github.com/sigstore/cosign/blob/main/FUN.md
+* https://github.com/sigstore/fulcio/blob/main/docs/security-model.md
