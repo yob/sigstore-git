@@ -58,7 +58,7 @@ You can see the signature by printing the raw commit:
     gpgsig -----BEGIN SIGNED MESSAGE-----
      MIIH+gYJKoZIhvcNAQcCoIIH6zCCB+cCAQExDzANBglghkgBZQMEAgEFADALBgkq
      hkiG9w0BBwGgggVqMIIDajCCAvCgAwIBAgIUAJhvLyJ3VcikUXBqkQyIbcz4KEcw
-     CgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhz 
+     CgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhz
      <...>
 
 On GitHub, the appear like this:
