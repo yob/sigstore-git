@@ -115,18 +115,21 @@ is within the valid 20 minute period.
 
 ## TODO
 
-So far the CLI interface emulates the bits of gpgsm that git uses to sign and verify commits. I'd
-like to add a new mode that can be called in a CI environment to verify the signed identity of the
-user. Maybe something like this to accept any user from a trusted domain:
+* Add addtional flags to --check mode
+  * we already have checking the email domain of the signing identity, and checking the identity provider
+  * add check for a single specific user
+  * add check for commit email matching the signature identity
+* Port to go for portability?
+* signing mode should submit signing proof to rektor so we can later verify the signature was made when it
+  says it was made
+* check mode should support looking for proof (via rektor) that the signature was made at the time it claims
+  * this defends against someone finding an expired fulcio issued cert and private key, and using it to create
+    a back-dated signed commit that appears valid
+  * do we want to do this in verify mode as well? It'll make some git calls slower, but might be worthwhile
+* Add visual certificate chain to output of --check
 
-    $ sigstore --validate-email-domain yob.id.au
-
-Or single users:
-
-    $ sigstore --validate-email james@yob.id.au --validate-email bob@example.com
-
-The output should be fairly verbose and clear about the identity found in the
-current commit, and if it's trusted then why we trust it. 
+ CN=sigstore, O=sigstore.dev [serial: xxx]
+   └─ james@yob.id.au (https://accounts.google.com) [serial: xxx]
 
 ## Acknowledgements
 
