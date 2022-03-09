@@ -113,6 +113,29 @@ these commands outside the 20 minute window, we must tell openssl to ignore the 
 real world verification of signed git commits, we probably want to confirm that the commit date
 is within the valid 20 minute period.
 
+## Threat Modelling
+
+Considering some attack scenarios and how to mitigate them.
+
+### Can someone find an expired fulcio issued certificate and matching private key, and create a back-dated commit within the 20 minute certificate valid period?
+
+Yes, this is possible. To protect against it, we need two things:
+
+* in signing mode, we should send proof of the signature to rektor for timestamping
+* in verify/check mode, we should check for proof of the signature on rektor and verify the timestamp aligns
+
+### Could a bad actor at sigstore issue a certificate without first receiving a valid OIDC token?
+
+Yes, this is possible and it's hard to mitigate against. Similar to how protecting against this issue in the HTTPS TLS certificate world is hard.
+
+Fulcio does publish all certificates to a transparency log. It's out of scope for this tool, but it'd be possible to monitor that for unauthorized certificates.
+
+Another option might be to validate the records in the transparency log against OIDC token issuing logs from your identity provider. Certificates issued without a matching OIDC token log entry are suspicious.
+
+### One of our users had their account at our OIDC provider hacked. We've recovered the account, can I ensure commits from the compromised period are invalid?
+
+This currently isn't an option, but it would be fairly easy to add. Our check and verify modes would need a way to load the identity and time window that should be explicitly denied as valid.
+
 ## TODO
 
 * Add addtional flags to --check mode
