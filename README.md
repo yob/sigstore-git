@@ -1,5 +1,12 @@
 # sigstore-git
 
+## STATUS
+
+This was a fun experiment, but it's superseeded by
+[gitsign](https://github.com/sigstore/gitsign), released by sigstore.
+
+## Notes
+
 An experiment in signing git commits with x509 certificates provided by sigstore.
 
 The [fulcio project](https://github.com/sigstore/fulcio) by
